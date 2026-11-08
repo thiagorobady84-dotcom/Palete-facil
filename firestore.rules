@@ -1,0 +1,59 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Products collection
+    match /products/{productId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && incoming().name is string
+        && incoming().name.size() > 0
+        && incoming().name.size() <= 150;
+      allow delete: if false;
+    }
+
+    // Pallets collection
+    match /pallets/{palletId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && incoming().code is string
+        && incoming().code.size() > 0
+        && incoming().code.size() <= 30;
+      allow delete: if isSignedIn();
+    }
+
+    // Pallet stock collection (EstoquePorPallet)
+    match /palletStock/{stockId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && incoming().palletId is string
+        && incoming().productId is string
+        && incoming().quantity is number
+        && incoming().quantity >= 0;
+      allow delete: if isSignedIn();
+    }
+
+    // Movements collection (Immutable audit log)
+    match /movements/{movementId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && incoming().type in ['ENTRADA', 'RETIRADA', 'TRANSFERENCIA', 'AJUSTE']
+        && incoming().quantity is number
+        && incoming().quantity > 0;
+      allow update, delete: if false; // Imutabilidade do histórico
+    }
+  }
+}

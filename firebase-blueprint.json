@@ -1,0 +1,86 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Produto registrado no estoque geral",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "code": { "type": "string", "maxLength": 100 },
+        "normalizedName": { "type": "string", "maxLength": 150 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["name", "normalizedName"]
+    },
+    "Pallet": {
+      "title": "Pallet",
+      "description": "Estrutura de pallet identificada por código único",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "location": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["code"]
+    },
+    "PalletStock": {
+      "title": "PalletStock",
+      "description": "Estoque de um produto específico em um pallet",
+      "type": "object",
+      "properties": {
+        "palletId": { "type": "string", "maxLength": 128 },
+        "palletCode": { "type": "string", "maxLength": 30 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 150 },
+        "productCode": { "type": "string", "maxLength": 100 },
+        "normalizedProductName": { "type": "string", "maxLength": 150 },
+        "quantity": { "type": "number" },
+        "unit": { "type": "string", "enum": ["caixas", "unidades"] },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["palletId", "palletCode", "productId", "productName", "quantity", "unit"]
+    },
+    "Movement": {
+      "title": "Movement",
+      "description": "Registro de histórico de movimentação física ou ajuste",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["ENTRADA", "RETIRADA", "TRANSFERENCIA", "AJUSTE"] },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 150 },
+        "productCode": { "type": "string", "maxLength": 100 },
+        "originPalletId": { "type": "string", "maxLength": 128 },
+        "originPalletCode": { "type": "string", "maxLength": 30 },
+        "destinationPalletId": { "type": "string", "maxLength": 128 },
+        "destinationPalletCode": { "type": "string", "maxLength": 30 },
+        "quantity": { "type": "number" },
+        "unit": { "type": "string", "enum": ["caixas", "unidades"] },
+        "reason": { "type": "string", "maxLength": 250 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "userEmail": { "type": "string", "maxLength": 150 },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["type", "productId", "productName", "quantity", "unit", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Catálogo de produtos da empresa"
+    },
+    "/pallets/{palletId}": {
+      "schema": "Pallet",
+      "description": "Pallets endereçados no armazém"
+    },
+    "/palletStock/{stockId}": {
+      "schema": "PalletStock",
+      "description": "Saldos de produtos por pallet e unidade"
+    },
+    "/movements/{movementId}": {
+      "schema": "Movement",
+      "description": "Log imutável de movimentações de pallets"
+    }
+  }
+}

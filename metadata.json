@@ -1,0 +1,6 @@
+{
+  "name": "Pallet Fácil",
+  "description": "Sistema de endereçamento logístico e controle de estoque por pallets",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
