@@ -55,5 +55,15 @@ service cloud.firestore {
         && incoming().quantity > 0;
       allow update, delete: if false; // Imutabilidade do histórico
     }
+
+    // Deleted pallets collection (Lixeira de paletes para restauração)
+    match /deletedPallets/{deletedId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && incoming().code is string
+        && incoming().code.size() > 0
+        && incoming().code.size() <= 30;
+      allow delete: if isSignedIn();
+    }
   }
 }

@@ -14,13 +14,14 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import { Product, Pallet, PalletStock, Movement, UnitType } from '../types';
+import { Product, Pallet, PalletStock, Movement, UnitType, DeletedPallet, DeletedPalletItem } from '../types';
 import { normalizeText, formatPalletCode } from '../utils/normalize';
 
 const PRODUCTS_COL = 'products';
 const PALLETS_COL = 'pallets';
 const PALLET_STOCK_COL = 'palletStock';
 const MOVEMENTS_COL = 'movements';
+const DELETED_PALLETS_COL = 'deletedPallets';
 
 /**
  * Cadastra ou obtém produto existente pelo nome
@@ -225,10 +226,11 @@ export async function registerProductIntake(params: {
   quantity: number;
   unit: UnitType;
   expirationDate?: string;
+  reason?: string;
   userEmail?: string;
   userId?: string;
 }): Promise<void> {
-  const { productName, productCode, palletId, palletCode, quantity, unit, expirationDate, userEmail, userId } = params;
+  const { productName, productCode, palletId, palletCode, quantity, unit, expirationDate, reason, userEmail, userId } = params;
   const trimmedExpiry = expirationDate?.trim() || '';
 
   if (quantity <= 0 || !Number.isInteger(quantity)) {
@@ -304,6 +306,7 @@ export async function registerProductIntake(params: {
       quantity,
       unit,
       expirationDate: trimmedExpiry,
+      ...(reason?.trim() ? { reason: reason.trim() } : {}),
       userEmail: userEmail || 'Operador',
       userId: userId || '',
       createdAt: new Date().toISOString(),
@@ -663,11 +666,14 @@ export async function deletePallet(
     typeof palletIdOrParams === 'string' ? rawUserId || '' : palletIdOrParams.userId || '';
 
   try {
-    // 1. Localizar todos os itens de estoque deste pallet (por palletId e fallback por palletCode)
-    const [snapById, snapByCode] = await Promise.all([
+    // 1. Localizar o pallet e todos os itens de estoque deste pallet (por palletId e fallback por palletCode)
+    const [palletDocSnap, snapById, snapByCode] = await Promise.all([
+      getDoc(doc(db, PALLETS_COL, palletId)),
       getDocs(query(collection(db, PALLET_STOCK_COL), where('palletId', '==', palletId))),
       getDocs(query(collection(db, PALLET_STOCK_COL), where('palletCode', '==', palletCode))),
     ]);
+
+    const palletLocation = palletDocSnap.exists() ? (palletDocSnap.data().location || '') : '';
 
     const stockDocsMap = new Map<string, PalletStock>();
     for (const d of snapById.docs) {
@@ -679,13 +685,23 @@ export async function deletePallet(
       }
     }
 
-    // 2. Executar baixas no histórico, remoção de estoques e exclusão do pallet em lote atômico rápido
+    // 2. Executar baixas no histórico, backup na lixeira, remoção de estoques e exclusão do pallet em lote atômico rápido
     const batch = writeBatch(db);
     const nowIso = new Date().toISOString();
+    const backupItems: DeletedPalletItem[] = [];
 
     for (const [docId, stockData] of stockDocsMap.entries()) {
       const qty = Number(stockData.quantity) || 0;
       if (qty > 0) {
+        backupItems.push({
+          productId: stockData.productId,
+          productName: stockData.productName,
+          productCode: stockData.productCode || '',
+          quantity: qty,
+          unit: stockData.unit,
+          expirationDate: stockData.expirationDate || '',
+        });
+
         const movementRef = doc(collection(db, MOVEMENTS_COL));
         const movement: Movement = {
           id: movementRef.id,
@@ -708,10 +724,228 @@ export async function deletePallet(
       batch.delete(doc(db, PALLET_STOCK_COL, docId));
     }
 
+    // Salva cópia de segurança na lixeira para restauração rápida
+    const deletedRef = doc(collection(db, DELETED_PALLETS_COL));
+    const deletedSnapshot: DeletedPallet = {
+      id: deletedRef.id,
+      palletId,
+      code: palletCode,
+      location: palletLocation,
+      items: backupItems,
+      deletedAt: nowIso,
+      deletedByEmail: userEmail,
+      deletedByUserId: userId,
+    };
+    batch.set(deletedRef, deletedSnapshot);
+
     batch.delete(doc(db, PALLETS_COL, palletId));
     await batch.commit();
   } catch (err) {
     handleFirestoreError(err, OperationType.DELETE, `${PALLETS_COL}/${palletId}`);
+  }
+}
+
+/**
+ * Monta a lista de paletes excluídos recuperáveis (da lixeira + histórico de movimentações antigas)
+ */
+export function getRecoverableDeletedPallets(
+  activePallets: Pallet[],
+  movements: Movement[],
+  trashSnapshots: DeletedPallet[]
+): DeletedPallet[] {
+  const activeCodes = new Set(activePallets.map((p) => formatPalletCode(p.code)));
+  const recoveredMap = new Map<string, DeletedPallet>();
+
+  // 1. Primeiro, itens salvos na lixeira (incluem localização física e pallets vazios)
+  for (const snap of trashSnapshots) {
+    const code = formatPalletCode(snap.code);
+    if (!code || activeCodes.has(code)) continue;
+    const existing = recoveredMap.get(code);
+    if (!existing || new Date(snap.deletedAt).getTime() > new Date(existing.deletedAt).getTime()) {
+      recoveredMap.set(code, { ...snap, code, source: 'trash' });
+    }
+  }
+
+  // 2. Fallback: reconstruir paletes excluídos anteriormente a partir do histórico imutável (movements)
+  const withdrawalsByCode = new Map<string, Movement[]>();
+  const latestIntakeByCode = new Map<string, number>();
+  const latestActivityByCode = new Map<string, { createdAt: string; userEmail?: string; userId?: string; palletId?: string }>();
+
+  for (const m of movements) {
+    const destCode = m.destinationPalletCode ? formatPalletCode(m.destinationPalletCode) : '';
+    const origCode = m.originPalletCode ? formatPalletCode(m.originPalletCode) : '';
+    const ts = new Date(m.createdAt).getTime() || 0;
+
+    if (destCode) {
+      if (!activeCodes.has(destCode)) {
+        const prevAct = latestActivityByCode.get(destCode);
+        if (!prevAct || ts > (new Date(prevAct.createdAt).getTime() || 0)) {
+          latestActivityByCode.set(destCode, {
+            createdAt: m.createdAt,
+            userEmail: m.userEmail,
+            userId: m.userId,
+            palletId: m.destinationPalletId,
+          });
+        }
+      }
+      if (m.type === 'ENTRADA' || m.type === 'TRANSFERENCIA') {
+        const prev = latestIntakeByCode.get(destCode) || 0;
+        if (ts > prev) latestIntakeByCode.set(destCode, ts);
+      }
+    }
+
+    if (origCode && !activeCodes.has(origCode)) {
+      const prevAct = latestActivityByCode.get(origCode);
+      if (!prevAct || ts > (new Date(prevAct.createdAt).getTime() || 0)) {
+        latestActivityByCode.set(origCode, {
+          createdAt: m.createdAt,
+          userEmail: m.userEmail,
+          userId: m.userId,
+          palletId: m.originPalletId,
+        });
+      }
+    }
+
+    if (m.type === 'RETIRADA' && origCode) {
+      if (activeCodes.has(origCode) || recoveredMap.has(origCode)) continue;
+      const list = withdrawalsByCode.get(origCode) || [];
+      list.push(m);
+      withdrawalsByCode.set(origCode, list);
+    }
+  }
+
+  for (const [code, list] of withdrawalsByCode.entries()) {
+    // Prioriza movimentações com motivo de exclusão de pallet
+    const explicitDeletions = list.filter((m) => {
+      const r = normalizeText(m.reason || '');
+      return (r.includes('exclus') || r.includes('exclu')) && r.includes('pallet');
+    });
+
+    const sourceList = explicitDeletions.length > 0 ? explicitDeletions : list;
+    const sorted = [...sourceList].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+    const latestMov = sorted[0];
+    if (!latestMov) continue;
+
+    const latestTs = new Date(latestMov.createdAt).getTime() || 0;
+    const lastIntakeTs = latestIntakeByCode.get(code) || 0;
+
+    // Se houve entrada depois de uma retirada comum (não marcada como exclusão), não restaurar itens antigos
+    if (explicitDeletions.length === 0 && lastIntakeTs > latestTs) {
+      continue;
+    }
+
+    // Janela de 60s para exclusões sequenciais antigas, ou 15s para baixas agrupadas
+    const windowMs = explicitDeletions.length > 0 ? 60000 : 15000;
+    const batchMovements = sorted.filter(
+      (m) => Math.abs(latestTs - (new Date(m.createdAt).getTime() || 0)) <= windowMs
+    );
+
+    const itemsMap = new Map<string, DeletedPalletItem>();
+    for (const m of batchMovements) {
+      const qty = Number(m.quantity) || 0;
+      if (qty <= 0) continue;
+      const key = `${normalizeText(m.productName)}__${m.unit}`;
+      const existing = itemsMap.get(key);
+      if (existing) {
+        existing.quantity += qty;
+        if (!existing.expirationDate && m.expirationDate) {
+          existing.expirationDate = m.expirationDate;
+        }
+      } else {
+        itemsMap.set(key, {
+          productId: m.productId,
+          productName: m.productName,
+          productCode: m.productCode || '',
+          quantity: qty,
+          unit: m.unit,
+          expirationDate: m.expirationDate || '',
+        });
+      }
+    }
+
+    const items = Array.from(itemsMap.values());
+    if (items.length > 0) {
+      recoveredMap.set(code, {
+        id: `history_${code}_${latestTs}`,
+        palletId: latestMov.originPalletId || code,
+        code,
+        location: '',
+        items,
+        deletedAt: latestMov.createdAt,
+        deletedByEmail: latestMov.userEmail,
+        deletedByUserId: latestMov.userId,
+        source: 'history',
+      });
+    }
+  }
+
+  // 3. Pallets vazios excluídos antes da atualização que tiveram movimentação no histórico
+  for (const [code, activity] of latestActivityByCode.entries()) {
+    if (activeCodes.has(code) || recoveredMap.has(code)) continue;
+    recoveredMap.set(code, {
+      id: `history_empty_${code}`,
+      palletId: activity.palletId || code,
+      code,
+      location: '',
+      items: [],
+      deletedAt: activity.createdAt,
+      deletedByEmail: activity.userEmail,
+      deletedByUserId: activity.userId,
+      source: 'history',
+    });
+  }
+
+  return Array.from(recoveredMap.values()).sort(
+    (a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime()
+  );
+}
+
+/**
+ * Restaura um pallet excluído (recria o endereço, devolve todos os itens e registra no histórico)
+ */
+export async function restoreDeletedPallet(params: {
+  deletedPallet: DeletedPallet;
+  userEmail?: string;
+  userId?: string;
+}): Promise<Pallet> {
+  const { deletedPallet, userEmail, userId } = params;
+
+  const createdPallet = await createPallet(deletedPallet.code, deletedPallet.location || '');
+
+  for (const item of deletedPallet.items) {
+    const qty = Number(item.quantity) || 0;
+    if (qty <= 0) continue;
+    await registerProductIntake({
+      productName: item.productName,
+      productCode: item.productCode,
+      palletId: createdPallet.id,
+      palletCode: createdPallet.code,
+      quantity: qty,
+      unit: item.unit,
+      expirationDate: item.expirationDate || undefined,
+      reason: `Restauração do Pallet ${createdPallet.code} excluído anteriormente`,
+      userEmail: userEmail || 'Operador',
+      userId: userId || '',
+    });
+  }
+
+  if (deletedPallet.source === 'trash' && deletedPallet.id) {
+    await deleteDoc(doc(db, DELETED_PALLETS_COL, deletedPallet.id)).catch(() => {});
+  }
+
+  return createdPallet;
+}
+
+/**
+ * Remove definitivamente uma entrada da lixeira de paletes
+ */
+export async function dismissDeletedPalletFromTrash(deletedPalletId: string): Promise<void> {
+  try {
+    await deleteDoc(doc(db, DELETED_PALLETS_COL, deletedPalletId));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `${DELETED_PALLETS_COL}/${deletedPalletId}`);
   }
 }
 

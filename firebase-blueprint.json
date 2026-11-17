@@ -66,6 +66,20 @@
         "createdAt": { "type": "string" }
       },
       "required": ["type", "productId", "productName", "quantity", "unit", "createdAt"]
+    },
+    "DeletedPallet": {
+      "title": "DeletedPallet",
+      "description": "Cópia de segurança de pallet excluído para restauração rápida",
+      "type": "object",
+      "properties": {
+        "palletId": { "type": "string", "maxLength": 128 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "location": { "type": "string", "maxLength": 120 },
+        "deletedAt": { "type": "string" },
+        "deletedByEmail": { "type": "string", "maxLength": 150 },
+        "deletedByUserId": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["palletId", "code", "deletedAt"]
     }
   },
   "firestore": {
@@ -84,6 +98,10 @@
     "/movements/{movementId}": {
       "schema": "Movement",
       "description": "Log imutável de movimentações de pallets"
+    },
+    "/deletedPallets/{deletedId}": {
+      "schema": "DeletedPallet",
+      "description": "Lixeira de paletes excluídos para restauração"
     }
   }
 }

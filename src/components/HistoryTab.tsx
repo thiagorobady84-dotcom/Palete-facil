@@ -9,18 +9,58 @@ import {
   Calendar,
   User as UserIcon,
   Layers,
+  RotateCcw,
+  CheckCircle,
 } from 'lucide-react';
-import { Movement, MovementType } from '../types';
+import { Movement, MovementType, Pallet, DeletedPallet } from '../types';
 import { normalizeText } from '../utils/normalize';
 import { formatExpirationDate } from '../utils/date';
+import { getRecoverableDeletedPallets, restoreDeletedPallet } from '../services/palletService';
+import { User } from 'firebase/auth';
 
 interface HistoryTabProps {
   movements: Movement[];
+  pallets?: Pallet[];
+  deletedPallets?: DeletedPallet[];
+  currentUser?: User | null;
 }
 
-export const HistoryTab: React.FC<HistoryTabProps> = ({ movements }) => {
+export const HistoryTab: React.FC<HistoryTabProps> = ({
+  movements,
+  pallets = [],
+  deletedPallets = [],
+  currentUser,
+}) => {
   const [filterType, setFilterType] = useState<string>('TODOS');
   const [searchText, setSearchText] = useState('');
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [restoreToast, setRestoreToast] = useState<string | null>(null);
+
+  const recoverablePallets = useMemo(() => {
+    return getRecoverableDeletedPallets(pallets, movements, deletedPallets);
+  }, [pallets, movements, deletedPallets]);
+
+  const handleRestore = async (dp: DeletedPallet) => {
+    setRestoringId(dp.id);
+    try {
+      const restored = await restoreDeletedPallet({
+        deletedPallet: dp,
+        userEmail: currentUser?.email || 'Operador',
+        userId: currentUser?.uid || '',
+      });
+      setRestoreToast(
+        dp.items.length > 0
+          ? `Pallet ${restored.code} restaurado com ${dp.items.length} ${dp.items.length === 1 ? 'produto' : 'produtos'}!`
+          : `Pallet ${restored.code} restaurado!`
+      );
+      setTimeout(() => setRestoreToast(null), 5000);
+    } catch (err: any) {
+      setRestoreToast(err.message || `Erro ao restaurar Pallet ${dp.code}.`);
+      setTimeout(() => setRestoreToast(null), 5000);
+    } finally {
+      setRestoringId(null);
+    }
+  };
 
   const filteredMovements = useMemo(() => {
     let list = [...movements];
@@ -102,6 +142,52 @@ export const HistoryTab: React.FC<HistoryTabProps> = ({ movements }) => {
 
   return (
     <div className="space-y-4 pb-28">
+      {restoreToast && (
+        <div className="p-3.5 bg-emerald-50 border-2 border-emerald-500 rounded-2xl text-emerald-900 text-xs font-bold flex items-center gap-2 shadow-xs">
+          <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span>{restoreToast}</span>
+        </div>
+      )}
+
+      {recoverablePallets.length > 0 && (
+        <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-3.5 space-y-2.5 shadow-xs">
+          <div className="flex items-center gap-2">
+            <RotateCcw className="w-4 h-4 text-amber-700 shrink-0" />
+            <h3 className="text-xs sm:text-sm font-black text-amber-950">
+              Paletes excluídos recuperáveis ({recoverablePallets.length})
+            </h3>
+          </div>
+          <div className="space-y-1.5">
+            {recoverablePallets.slice(0, 5).map((dp) => (
+              <div
+                key={dp.id}
+                className="bg-white border border-amber-200 rounded-xl p-2.5 flex items-center justify-between gap-2"
+              >
+                <div className="min-w-0">
+                  <span className="font-mono font-black text-xs bg-amber-100 text-amber-950 px-2 py-0.5 rounded mr-2">
+                    {dp.code}
+                  </span>
+                  <span className="text-xs text-slate-700 font-medium">
+                    {dp.items.length > 0
+                      ? `${dp.items.length} ${dp.items.length === 1 ? 'produto' : 'produtos'}`
+                      : 'Pallet vazio'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  disabled={restoringId === dp.id}
+                  onClick={() => handleRestore(dp)}
+                  className="min-h-[36px] inline-flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs px-3 py-1.5 rounded-lg transition active:scale-95 disabled:opacity-50 shrink-0"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>{restoringId === dp.id ? 'Restaurando...' : 'Restaurar'}</span>
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Header and filters */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
         <div className="flex items-center justify-between">

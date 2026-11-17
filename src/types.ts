@@ -53,4 +53,25 @@ export interface Movement {
   createdAt: string;
 }
 
+export interface DeletedPalletItem {
+  productId?: string;
+  productName: string;
+  productCode?: string;
+  quantity: number;
+  unit: UnitType;
+  expirationDate?: string;
+}
+
+export interface DeletedPallet {
+  id: string;
+  palletId: string;
+  code: string;
+  location?: string;
+  items: DeletedPalletItem[];
+  deletedAt: string;
+  deletedByEmail?: string;
+  deletedByUserId?: string;
+  source?: 'trash' | 'history';
+}
+
 export type TabType = 'pesquisar' | 'pallets' | 'entrada' | 'movimentar' | 'historico';

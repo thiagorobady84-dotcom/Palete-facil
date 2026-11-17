@@ -17,7 +17,7 @@ import {
   OperationType,
   resolvedFirebaseConfig,
 } from './firebase';
-import { Product, Pallet, PalletStock, Movement, TabType } from './types';
+import { Product, Pallet, PalletStock, Movement, DeletedPallet, TabType } from './types';
 import { seedDemoDataIfEmpty, cleanupAndConsolidatePalletStock } from './services/palletService';
 
 import { Header } from './components/Header';
@@ -44,6 +44,7 @@ export default function App() {
   const [pallets, setPallets] = useState<Pallet[]>([]);
   const [palletStock, setPalletStock] = useState<PalletStock[]>([]);
   const [movements, setMovements] = useState<Movement[]>([]);
+  const [deletedPallets, setDeletedPallets] = useState<DeletedPallet[]>([]);
 
   // Selected pallet for detail modal
   const [selectedPallet, setSelectedPallet] = useState<Pallet | null>(null);
@@ -101,6 +102,7 @@ export default function App() {
       setPallets([]);
       setPalletStock([]);
       setMovements([]);
+      setDeletedPallets([]);
       return;
     }
 
@@ -158,11 +160,25 @@ export default function App() {
       (error) => handleFirestoreError(error, OperationType.GET, 'movements')
     );
 
+    // Listener: DeletedPallets (Lixeira de paletes excluídos)
+    const unsubDeletedPallets = onSnapshot(
+      collection(db, 'deletedPallets'),
+      (snap) => {
+        const list: DeletedPallet[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<DeletedPallet, 'id'>),
+        }));
+        setDeletedPallets(list);
+      },
+      (error) => console.warn('Deleted pallets listener:', error)
+    );
+
     return () => {
       unsubProducts();
       unsubPallets();
       unsubStock();
       unsubMovements();
+      unsubDeletedPallets();
     };
   }, [currentUser]);
 
@@ -349,6 +365,8 @@ export default function App() {
               <PalletsTab
                 pallets={pallets}
                 palletStocks={palletStock}
+                movements={movements}
+                deletedPallets={deletedPallets}
                 currentUser={currentUser}
                 onSelectPallet={(pallet) => setSelectedPallet(pallet)}
                 onGoToIntake={() => setActiveTab('entrada')}
@@ -383,7 +401,12 @@ export default function App() {
             )}
 
             {activeTab === 'historico' && (
-              <HistoryTab movements={movements} />
+              <HistoryTab
+                movements={movements}
+                pallets={pallets}
+                deletedPallets={deletedPallets}
+                currentUser={currentUser}
+              />
             )}
           </>
         )}

@@ -1,7 +1,28 @@
 import React, { useState, useMemo } from 'react';
-import { Layers, Plus, Search, MapPin, ArrowRight, Check, Trash2, CheckCircle, AlertTriangle } from 'lucide-react';
-import { Pallet, PalletStock } from '../types';
-import { createPallet, suggestNextPalletCode, deletePallet } from '../services/palletService';
+import {
+  Layers,
+  Plus,
+  Search,
+  MapPin,
+  ArrowRight,
+  Check,
+  Trash2,
+  CheckCircle,
+  AlertTriangle,
+  RotateCcw,
+  ChevronDown,
+  ChevronUp,
+  X,
+} from 'lucide-react';
+import { Pallet, PalletStock, Movement, DeletedPallet } from '../types';
+import {
+  createPallet,
+  suggestNextPalletCode,
+  deletePallet,
+  getRecoverableDeletedPallets,
+  restoreDeletedPallet,
+  dismissDeletedPalletFromTrash,
+} from '../services/palletService';
 import { normalizeText } from '../utils/normalize';
 import { getExpirationInfo } from '../utils/date';
 import { DeletePalletModal } from './DeletePalletModal';
@@ -10,6 +31,8 @@ import { User } from 'firebase/auth';
 interface PalletsTabProps {
   pallets: Pallet[];
   palletStocks: PalletStock[];
+  movements?: Movement[];
+  deletedPallets?: DeletedPallet[];
   currentUser?: User | null;
   onSelectPallet: (pallet: Pallet) => void;
   onGoToIntake: () => void;
@@ -18,6 +41,8 @@ interface PalletsTabProps {
 export const PalletsTab: React.FC<PalletsTabProps> = ({
   pallets,
   palletStocks,
+  movements = [],
+  deletedPallets = [],
   currentUser,
   onSelectPallet,
   onGoToIntake,
@@ -32,6 +57,13 @@ export const PalletsTab: React.FC<PalletsTabProps> = ({
   const [newLocation, setNewLocation] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [showRestorePanel, setShowRestorePanel] = useState(true);
+  const [restoringPalletId, setRestoringPalletId] = useState<string | null>(null);
+  const [isRestoringAll, setIsRestoringAll] = useState(false);
+
+  const recoverablePallets = useMemo(() => {
+    return getRecoverableDeletedPallets(pallets, movements, deletedPallets);
+  }, [pallets, movements, deletedPallets]);
 
   // Group pallet stocks by palletId or palletCode
   const palletStats = useMemo(() => {
@@ -116,13 +148,76 @@ export const PalletsTab: React.FC<PalletsTabProps> = ({
         userId: currentUser?.uid || '',
       });
       setQuickConfirmPalletId(null);
-      setToastMessage(`Pallet ${pallet.code} excluído com sucesso.`);
-      setTimeout(() => setToastMessage(null), 4000);
+      setToastMessage(`Pallet ${pallet.code} excluído. Você pode restaurá-lo abaixo se precisar.`);
+      setTimeout(() => setToastMessage(null), 5000);
     } catch (err: any) {
       setToastMessage(err.message || 'Erro ao excluir pallet.');
       setTimeout(() => setToastMessage(null), 4000);
     } finally {
       setDeletingPalletId(null);
+    }
+  };
+
+  const handleRestorePallet = async (deletedPallet: DeletedPallet) => {
+    setRestoringPalletId(deletedPallet.id);
+    try {
+      const restored = await restoreDeletedPallet({
+        deletedPallet,
+        userEmail: currentUser?.email || 'Operador',
+        userId: currentUser?.uid || '',
+      });
+      const count = deletedPallet.items.length;
+      setToastMessage(
+        count > 0
+          ? `Pallet ${restored.code} restaurado com ${count} ${count === 1 ? 'produto' : 'produtos'}!`
+          : `Pallet ${restored.code} restaurado com sucesso!`
+      );
+      setTimeout(() => setToastMessage(null), 5000);
+    } catch (err: any) {
+      setToastMessage(err.message || `Erro ao restaurar o Pallet ${deletedPallet.code}.`);
+      setTimeout(() => setToastMessage(null), 5000);
+    } finally {
+      setRestoringPalletId(null);
+    }
+  };
+
+  const handleRestoreAllPallets = async () => {
+    if (recoverablePallets.length === 0 || isRestoringAll) return;
+    setIsRestoringAll(true);
+    let restoredCount = 0;
+    try {
+      for (const dp of recoverablePallets) {
+        await restoreDeletedPallet({
+          deletedPallet: dp,
+          userEmail: currentUser?.email || 'Operador',
+          userId: currentUser?.uid || '',
+        });
+        restoredCount += 1;
+      }
+      setToastMessage(
+        restoredCount === 1
+          ? '1 pallet restaurado com sucesso!'
+          : `${restoredCount} paletes restaurados com sucesso!`
+      );
+      setTimeout(() => setToastMessage(null), 5000);
+    } catch (err: any) {
+      setToastMessage(err.message || 'Erro ao restaurar alguns paletes.');
+      setTimeout(() => setToastMessage(null), 5000);
+    } finally {
+      setIsRestoringAll(false);
+    }
+  };
+
+  const formatDeletedTime = (iso: string) => {
+    try {
+      return new Intl.DateTimeFormat('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(new Date(iso));
+    } catch {
+      return '';
     }
   };
 
@@ -149,6 +244,117 @@ export const PalletsTab: React.FC<PalletsTabProps> = ({
           <span>Novo Pallet</span>
         </button>
       </div>
+
+      {/* Restore Recently Deleted Pallets Section */}
+      {recoverablePallets.length > 0 && (
+        <div className="bg-amber-50/90 border-2 border-amber-300 rounded-2xl p-3.5 sm:p-4 shadow-xs space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => setShowRestorePanel((prev) => !prev)}
+              className="flex items-center gap-2 text-left flex-1 min-w-0"
+            >
+              <div className="bg-amber-600 text-white p-2 rounded-xl shrink-0">
+                <RotateCcw className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-black text-amber-950 leading-tight">
+                  Paletes excluídos recentemente ({recoverablePallets.length})
+                </h3>
+                <p className="text-[11px] text-amber-800 font-medium truncate">
+                  Toque em Restaurar para recuperar o pallet e seus itens
+                </p>
+              </div>
+              {showRestorePanel ? (
+                <ChevronUp className="w-4 h-4 text-amber-700 shrink-0 ml-auto" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-amber-700 shrink-0 ml-auto" />
+              )}
+            </button>
+
+            {recoverablePallets.length > 1 && (
+              <button
+                type="button"
+                disabled={isRestoringAll || restoringPalletId !== null}
+                onClick={handleRestoreAllPallets}
+                className="min-h-[38px] inline-flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 text-white font-black text-xs px-3.5 py-2 rounded-xl shadow-2xs transition active:scale-95 disabled:opacity-50"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>{isRestoringAll ? 'Restaurando...' : 'Restaurar Todos'}</span>
+              </button>
+            )}
+          </div>
+
+          {showRestorePanel && (
+            <div className="space-y-2 max-h-72 overflow-y-auto pr-0.5">
+              {recoverablePallets.map((dp) => {
+                const isRestoringThis = restoringPalletId === dp.id;
+                const totalUnits = dp.items.reduce((acc, it) => acc + (Number(it.quantity) || 0), 0);
+
+                return (
+                  <div
+                    key={dp.id}
+                    className="bg-white border border-amber-200 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                  >
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono font-black text-sm bg-amber-100 text-amber-950 px-2 py-0.5 rounded-lg">
+                          {dp.code}
+                        </span>
+                        <span className="text-[11px] text-slate-500 font-medium">
+                          Excluído em {formatDeletedTime(dp.deletedAt)}
+                        </span>
+                      </div>
+
+                      {dp.items.length > 0 ? (
+                        <p className="text-xs text-slate-700 font-medium leading-snug">
+                          <strong className="text-slate-900">
+                            {dp.items.length} {dp.items.length === 1 ? 'produto' : 'produtos'} ({totalUnits} total):
+                          </strong>{' '}
+                          {dp.items
+                            .slice(0, 3)
+                            .map((it) => `${it.productName} (${it.quantity} ${it.unit})`)
+                            .join(', ')}
+                          {dp.items.length > 3 ? ` +${dp.items.length - 3} mais` : ''}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-slate-500 italic">
+                          Pallet vazio {dp.location ? `· ${dp.location}` : ''}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        disabled={isRestoringThis || isRestoringAll}
+                        onClick={() => handleRestorePallet(dp)}
+                        className="flex-1 sm:flex-initial min-h-[40px] inline-flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-black text-xs px-4 py-2 rounded-xl shadow-2xs transition active:scale-95 disabled:opacity-50"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>{isRestoringThis ? 'Restaurando...' : 'Restaurar'}</span>
+                      </button>
+
+                      {dp.source === 'trash' && (
+                        <button
+                          type="button"
+                          disabled={isRestoringThis || isRestoringAll}
+                          onClick={() => dismissDeletedPalletFromTrash(dp.id)}
+                          className="min-h-[40px] min-w-[40px] flex items-center justify-center text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition"
+                          title="Remover da lixeira"
+                          aria-label={`Remover ${dp.code} da lixeira`}
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Pallets Grid */}
       {filteredPallets.length === 0 ? (
