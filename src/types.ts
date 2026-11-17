@@ -7,6 +7,7 @@ export interface Product {
   name: string;
   code?: string;
   normalizedName: string;
+  expirationDate?: string; // Formato YYYY-MM-DD (opcional)
   createdAt?: string;
   updatedAt?: string;
 }
@@ -29,6 +30,7 @@ export interface PalletStock {
   normalizedProductName: string;
   quantity: number;
   unit: UnitType;
+  expirationDate?: string; // Formato YYYY-MM-DD (opcional)
   updatedAt?: string;
 }
 
@@ -44,6 +46,7 @@ export interface Movement {
   destinationPalletCode?: string;
   quantity: number;
   unit: UnitType;
+  expirationDate?: string; // Formato YYYY-MM-DD (opcional)
   reason?: string;
   userId?: string;
   userEmail?: string;

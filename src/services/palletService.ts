@@ -11,6 +11,7 @@ import {
   where,
   orderBy,
   runTransaction,
+  writeBatch,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { Product, Pallet, PalletStock, Movement, UnitType } from '../types';
@@ -26,11 +27,13 @@ const MOVEMENTS_COL = 'movements';
  */
 export async function getOrCreateProduct(
   name: string,
-  code?: string
+  code?: string,
+  expirationDate?: string
 ): Promise<Product> {
   const trimmedName = name.trim();
   const normalized = normalizeText(trimmedName);
   const trimmedCode = code?.trim() || '';
+  const trimmedExpiry = expirationDate?.trim() || '';
 
   try {
     const q = query(collection(db, PRODUCTS_COL), where('normalizedName', '==', normalized));
@@ -39,24 +42,34 @@ export async function getOrCreateProduct(
     if (!snap.empty) {
       const docItem = snap.docs[0];
       const prod = { id: docItem.id, ...(docItem.data() as Omit<Product, 'id'>) };
+      const updates: Partial<Product> = {};
+
       // Se não tinha código antes e agora foi informado, atualiza
       if (trimmedCode && !prod.code) {
-        await updateDoc(doc(db, PRODUCTS_COL, prod.id), {
-          code: trimmedCode,
-          updatedAt: new Date().toISOString(),
-        });
+        updates.code = trimmedCode;
         prod.code = trimmedCode;
+      }
+      // Se foi informada validade, atualiza no cadastro do produto
+      if (trimmedExpiry && prod.expirationDate !== trimmedExpiry) {
+        updates.expirationDate = trimmedExpiry;
+        prod.expirationDate = trimmedExpiry;
+      }
+
+      if (Object.keys(updates).length > 0) {
+        updates.updatedAt = new Date().toISOString();
+        await updateDoc(doc(db, PRODUCTS_COL, prod.id), updates);
       }
       return prod;
     }
 
-    // Criar novo produto
+    // Criar novo produto (validade é opcional)
     const newDocRef = doc(collection(db, PRODUCTS_COL));
     const newProduct: Product = {
       id: newDocRef.id,
       name: trimmedName,
       code: trimmedCode,
       normalizedName: normalized,
+      expirationDate: trimmedExpiry,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -142,6 +155,64 @@ export function suggestNextPalletCode(pallets: Pallet[]): string {
 }
 
 /**
+ * Retorna o identificador único e padronizado do registro de estoque por pallet, produto e unidade
+ */
+export function getPalletStockDocId(palletId: string, productId: string, unit: UnitType): string {
+  return `${palletId}_${productId}_${unit}`.replace(/[\/\s]/g, '_');
+}
+
+/**
+ * Realiza limpeza preventiva e consolidação de registros de estoque:
+ * 1. Remove documentos com quantidade <= 0 ou corrompidos.
+ * 2. Unifica duplicidades do mesmo produto/unidade no mesmo pallet somando os saldos.
+ */
+export async function cleanupAndConsolidatePalletStock(): Promise<void> {
+  try {
+    const snap = await getDocs(collection(db, PALLET_STOCK_COL));
+    if (snap.empty) return;
+
+    const groups = new Map<string, Array<{ id: string; data: PalletStock }>>();
+
+    for (const d of snap.docs) {
+      const data = d.data() as PalletStock;
+      const rawQty = Number(data.quantity);
+
+      // Se a quantidade for <= 0 ou inválida, remove do banco imediatamente
+      if (isNaN(rawQty) || rawQty <= 0) {
+        await deleteDoc(doc(db, PALLET_STOCK_COL, d.id)).catch(() => {});
+        continue;
+      }
+
+      const key = `${data.palletId}_${data.productId}_${data.unit}`;
+      const list = groups.get(key) || [];
+      list.push({ id: d.id, data: { ...data, quantity: rawQty } });
+      groups.set(key, list);
+    }
+
+    // Se houver mais de um documento para a mesma chave, consolida somando as quantidades
+    for (const [, items] of groups.entries()) {
+      if (items.length > 1) {
+        const totalQty = items.reduce((sum, item) => sum + item.data.quantity, 0);
+        const primaryDoc = items[0];
+
+        // Atualiza o documento principal com a soma consolidada
+        await updateDoc(doc(db, PALLET_STOCK_COL, primaryDoc.id), {
+          quantity: totalQty,
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {});
+
+        // Deleta os documentos duplicados excedentes
+        for (let i = 1; i < items.length; i++) {
+          await deleteDoc(doc(db, PALLET_STOCK_COL, items[i].id)).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Erro na limpeza/consolidação preventiva de estoque:', err);
+  }
+}
+
+/**
  * Entrada de produtos:
  * - Se já existir no pallet um registro do mesmo produto e unidade, somar a quantidade em vez de duplicar.
  * - Registra movimentação do tipo ENTRADA.
@@ -153,17 +224,19 @@ export async function registerProductIntake(params: {
   palletCode: string;
   quantity: number;
   unit: UnitType;
+  expirationDate?: string;
   userEmail?: string;
   userId?: string;
 }): Promise<void> {
-  const { productName, productCode, palletId, palletCode, quantity, unit, userEmail, userId } = params;
+  const { productName, productCode, palletId, palletCode, quantity, unit, expirationDate, userEmail, userId } = params;
+  const trimmedExpiry = expirationDate?.trim() || '';
 
   if (quantity <= 0 || !Number.isInteger(quantity)) {
     throw new Error('A quantidade deve ser um número inteiro positivo maior que zero.');
   }
 
-  // 1. Obter ou cadastrar produto
-  const product = await getOrCreateProduct(productName, productCode);
+  // 1. Obter ou cadastrar produto (validade opcional)
+  const product = await getOrCreateProduct(productName, productCode, trimmedExpiry || undefined);
 
   try {
     // 2. Verificar se já existe estoque desse produto e unidade nesse pallet
@@ -176,20 +249,34 @@ export async function registerProductIntake(params: {
     const snap = await getDocs(q);
 
     if (!snap.empty) {
-      // Já existe: SOMAR a quantidade
-      const existingDoc = snap.docs[0];
-      const currentQty = existingDoc.data().quantity || 0;
-      const newQty = currentQty + quantity;
+      // Já existe: SOMAR a quantidade de todos os registros que possam existir (se houver duplicidade anterior)
+      const totalCurrentQty = snap.docs.reduce((sum, d) => sum + (Number(d.data().quantity) || 0), 0);
+      const newQty = totalCurrentQty + quantity;
+      const primaryDoc = snap.docs[0];
+      const existingData = primaryDoc.data() as PalletStock;
 
-      await updateDoc(doc(db, PALLET_STOCK_COL, existingDoc.id), {
+      const stockUpdates: Partial<PalletStock> = {
         quantity: newQty,
         updatedAt: new Date().toISOString(),
-      });
+      };
+      if (trimmedExpiry) {
+        stockUpdates.expirationDate = trimmedExpiry;
+      } else if (existingData.expirationDate) {
+        stockUpdates.expirationDate = existingData.expirationDate;
+      }
+
+      await updateDoc(doc(db, PALLET_STOCK_COL, primaryDoc.id), stockUpdates);
+
+      // Se havia duplicados legados, deleta os excedentes para evitar furos
+      for (let i = 1; i < snap.docs.length; i++) {
+        await deleteDoc(doc(db, PALLET_STOCK_COL, snap.docs[i].id)).catch(() => {});
+      }
     } else {
-      // Não existe: criar novo registro
-      const newStockRef = doc(collection(db, PALLET_STOCK_COL));
+      // Não existe: criar novo registro com ID padronizado
+      const stockDocId = getPalletStockDocId(palletId, product.id, unit);
+      const newStockRef = doc(db, PALLET_STOCK_COL, stockDocId);
       const newStock: PalletStock = {
-        id: newStockRef.id,
+        id: stockDocId,
         palletId,
         palletCode,
         productId: product.id,
@@ -198,6 +285,7 @@ export async function registerProductIntake(params: {
         normalizedProductName: product.normalizedName,
         quantity,
         unit,
+        expirationDate: trimmedExpiry,
         updatedAt: new Date().toISOString(),
       };
       await setDoc(newStockRef, newStock);
@@ -215,6 +303,7 @@ export async function registerProductIntake(params: {
       destinationPalletCode: palletCode,
       quantity,
       unit,
+      expirationDate: trimmedExpiry,
       userEmail: userEmail || 'Operador',
       userId: userId || '',
       createdAt: new Date().toISOString(),
@@ -226,8 +315,37 @@ export async function registerProductIntake(params: {
 }
 
 /**
- * Retirada de produtos do pallet
+ * Atualiza ou limpa a data de validade (opcional) de um item no pallet e no catálogo.
+ */
+export async function updateStockExpirationDate(params: {
+  stockId: string;
+  productId?: string;
+  expirationDate: string;
+}): Promise<void> {
+  const { stockId, productId, expirationDate } = params;
+  const trimmedExpiry = expirationDate.trim();
+
+  try {
+    await updateDoc(doc(db, PALLET_STOCK_COL, stockId), {
+      expirationDate: trimmedExpiry,
+      updatedAt: new Date().toISOString(),
+    });
+
+    if (productId) {
+      await updateDoc(doc(db, PRODUCTS_COL, productId), {
+        expirationDate: trimmedExpiry,
+        updatedAt: new Date().toISOString(),
+      }).catch(() => {});
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `${PALLET_STOCK_COL}/${stockId}`);
+  }
+}
+
+/**
+ * Retirada / Baixa de produtos do pallet
  * Impede quantidades negativas e saídas superiores ao saldo disponível.
+ * Remove o documento se o saldo for zerado, garantindo saída imediata da contagem.
  */
 export async function withdrawStock(params: {
   stockId: string;
@@ -252,7 +370,7 @@ export async function withdrawStock(params: {
       }
 
       const stockData = stockSnap.data() as PalletStock;
-      const currentQty = stockData.quantity;
+      const currentQty = Number(stockData.quantity) || 0;
 
       if (quantityToWithdraw > currentQty) {
         throw new Error(
@@ -262,7 +380,7 @@ export async function withdrawStock(params: {
 
       const remainingQty = currentQty - quantityToWithdraw;
 
-      if (remainingQty === 0) {
+      if (remainingQty <= 0) {
         // Se zerar o estoque no pallet, removemos o registro do pallet para mantê-lo limpo
         transaction.delete(stockRef);
       } else {
@@ -284,6 +402,7 @@ export async function withdrawStock(params: {
         originPalletCode: stockData.palletCode,
         quantity: quantityToWithdraw,
         unit: stockData.unit,
+        expirationDate: stockData.expirationDate || '',
         reason: reason?.trim() || 'Retirada operacional',
         userEmail: userEmail || 'Operador',
         userId: userId || '',
@@ -338,20 +457,21 @@ export async function transferStock(params: {
       }
 
       const originData = originSnap.data() as PalletStock;
+      const originCurrentQty = Number(originData.quantity) || 0;
 
       if (originData.palletId === destinationPalletId) {
         throw new Error('O pallet de destino deve ser diferente do pallet de origem.');
       }
 
-      if (quantityToTransfer > originData.quantity) {
+      if (quantityToTransfer > originCurrentQty) {
         throw new Error(
-          `Saldo insuficiente para transferência! O pallet ${originData.palletCode} possui apenas ${originData.quantity} ${originData.unit}.`
+          `Saldo insuficiente para transferência! O pallet ${originData.palletCode} possui apenas ${originCurrentQty} ${originData.unit}.`
         );
       }
 
       // 2. Atualizar estoque de origem
-      const originRemaining = originData.quantity - quantityToTransfer;
-      if (originRemaining === 0) {
+      const originRemaining = originCurrentQty - quantityToTransfer;
+      if (originRemaining <= 0) {
         transaction.delete(originRef);
       } else {
         transaction.update(originRef, {
@@ -361,20 +481,21 @@ export async function transferStock(params: {
       }
 
       // 3. Procurar estoque do mesmo produto/unidade no pallet de destino
-      // Em transação Firestore, buscas via query devem ser feitas antes ou usar docId previsível
-      // Para manter 100% atômico e sem conflito, usamos um id determinístico baseado em palletId_productId_unit
-      // Mas para compatibilidade com registros existentes, vamos verificar se existe registro de destino
-      // Vamos usar uma abordagem segura:
-      const destDocId = `${destinationPalletId}_${originData.productId}_${originData.unit}`;
+      const destDocId = getPalletStockDocId(destinationPalletId, originData.productId, originData.unit);
       const destRef = doc(db, PALLET_STOCK_COL, destDocId);
       const destSnap = await transaction.get(destRef);
 
       if (destSnap.exists()) {
-        const destCurrentQty = destSnap.data().quantity || 0;
-        transaction.update(destRef, {
+        const destData = destSnap.data() as PalletStock;
+        const destCurrentQty = Number(destData.quantity) || 0;
+        const destUpdates: Partial<PalletStock> = {
           quantity: destCurrentQty + quantityToTransfer,
           updatedAt: new Date().toISOString(),
-        });
+        };
+        if (originData.expirationDate && !destData.expirationDate) {
+          destUpdates.expirationDate = originData.expirationDate;
+        }
+        transaction.update(destRef, destUpdates);
       } else {
         // Criar no destino
         const newDestStock: PalletStock = {
@@ -387,6 +508,7 @@ export async function transferStock(params: {
           normalizedProductName: originData.normalizedProductName,
           quantity: quantityToTransfer,
           unit: originData.unit,
+          expirationDate: originData.expirationDate || '',
           updatedAt: new Date().toISOString(),
         };
         transaction.set(destRef, newDestStock);
@@ -406,6 +528,7 @@ export async function transferStock(params: {
         destinationPalletCode,
         quantity: quantityToTransfer,
         unit: originData.unit,
+        expirationDate: originData.expirationDate || '',
         reason: reason?.trim() || 'Transferência entre pallets',
         userEmail: userEmail || 'Operador',
         userId: userId || '',
@@ -457,14 +580,14 @@ export async function adjustStock(params: {
       }
 
       const stockData = stockSnap.data() as PalletStock;
-      const oldQty = stockData.quantity;
+      const oldQty = Number(stockData.quantity) || 0;
       const diff = newQuantity - oldQty;
 
       if (diff === 0) {
         throw new Error('A nova quantidade informada é idêntica à quantidade atual.');
       }
 
-      if (newQuantity === 0) {
+      if (newQuantity <= 0) {
         transaction.delete(stockRef);
       } else {
         transaction.update(stockRef, {
@@ -485,6 +608,7 @@ export async function adjustStock(params: {
         originPalletCode: stockData.palletCode,
         quantity: Math.abs(diff),
         unit: stockData.unit,
+        expirationDate: stockData.expirationDate || '',
         reason: `${trimmedReason} (Alterado de ${oldQty} para ${newQuantity} ${stockData.unit})`,
         userEmail: userEmail || 'Operador',
         userId: userId || '',
@@ -506,29 +630,205 @@ export async function adjustStock(params: {
 }
 
 /**
- * Excluir pallet vazio
- * Bloqueia exclusão se o pallet possuir saldo ativo.
+ * Excluir o pallet inteiro (esteja vazio ou com produtos) em lote atômico rápido
+ * Se possuir produtos armazenados, realiza a baixa com registro no histórico de auditoria
+ * para não quebrar a rastreabilidade e remove os saldos e o pallet em uma única operação.
  */
-export async function deletePallet(palletId: string, palletCode: string): Promise<void> {
-  try {
-    const q = query(collection(db, PALLET_STOCK_COL), where('palletId', '==', palletId));
-    const snap = await getDocs(q);
+export async function deletePallet(
+  palletIdOrParams:
+    | string
+    | {
+        palletId: string;
+        palletCode: string;
+        reason?: string;
+        userEmail?: string;
+        userId?: string;
+      },
+  rawPalletCode?: string,
+  rawReason?: string,
+  rawUserEmail?: string,
+  rawUserId?: string
+): Promise<void> {
+  const palletId =
+    typeof palletIdOrParams === 'string' ? palletIdOrParams : palletIdOrParams.palletId;
+  const palletCode =
+    typeof palletIdOrParams === 'string' ? rawPalletCode || 'Pallet' : palletIdOrParams.palletCode;
+  const reason =
+    typeof palletIdOrParams === 'string'
+      ? rawReason || `Exclusão do Pallet ${palletCode} por completo`
+      : palletIdOrParams.reason || `Exclusão do Pallet ${palletCode} por completo`;
+  const userEmail =
+    typeof palletIdOrParams === 'string' ? rawUserEmail || 'Operador' : palletIdOrParams.userEmail || 'Operador';
+  const userId =
+    typeof palletIdOrParams === 'string' ? rawUserId || '' : palletIdOrParams.userId || '';
 
-    if (!snap.empty) {
-      const hasStock = snap.docs.some((d) => d.data().quantity > 0);
-      if (hasStock) {
-        throw new Error(
-          `O pallet ${palletCode} não pode ser excluído pois ainda contém produtos armazenados. Transfira ou retire os produtos antes.`
-        );
+  try {
+    // 1. Localizar todos os itens de estoque deste pallet (por palletId e fallback por palletCode)
+    const [snapById, snapByCode] = await Promise.all([
+      getDocs(query(collection(db, PALLET_STOCK_COL), where('palletId', '==', palletId))),
+      getDocs(query(collection(db, PALLET_STOCK_COL), where('palletCode', '==', palletCode))),
+    ]);
+
+    const stockDocsMap = new Map<string, PalletStock>();
+    for (const d of snapById.docs) {
+      stockDocsMap.set(d.id, d.data() as PalletStock);
+    }
+    for (const d of snapByCode.docs) {
+      if (!stockDocsMap.has(d.id)) {
+        stockDocsMap.set(d.id, d.data() as PalletStock);
       }
     }
 
-    await deleteDoc(doc(db, PALLETS_COL, palletId));
+    // 2. Executar baixas no histórico, remoção de estoques e exclusão do pallet em lote atômico rápido
+    const batch = writeBatch(db);
+    const nowIso = new Date().toISOString();
+
+    for (const [docId, stockData] of stockDocsMap.entries()) {
+      const qty = Number(stockData.quantity) || 0;
+      if (qty > 0) {
+        const movementRef = doc(collection(db, MOVEMENTS_COL));
+        const movement: Movement = {
+          id: movementRef.id,
+          type: 'RETIRADA',
+          productId: stockData.productId,
+          productName: stockData.productName,
+          productCode: stockData.productCode || '',
+          originPalletId: palletId,
+          originPalletCode: palletCode,
+          quantity: qty,
+          unit: stockData.unit,
+          expirationDate: stockData.expirationDate || '',
+          reason: reason.trim(),
+          userEmail,
+          userId,
+          createdAt: nowIso,
+        };
+        batch.set(movementRef, movement);
+      }
+      batch.delete(doc(db, PALLET_STOCK_COL, docId));
+    }
+
+    batch.delete(doc(db, PALLETS_COL, palletId));
+    await batch.commit();
   } catch (err) {
-    if (err instanceof Error && err.message.includes('não pode ser excluído')) {
+    handleFirestoreError(err, OperationType.DELETE, `${PALLETS_COL}/${palletId}`);
+  }
+}
+
+
+/**
+ * Excluir produto do catálogo geral
+ * Se o produto tiver saldo em pallets, permite exclusão segura registrando
+ * a baixa no histórico para manter integridade da auditoria.
+ */
+export async function deleteProductFromCatalog(params: {
+  productId: string;
+  productName: string;
+  removeActiveStocks?: boolean;
+  reason?: string;
+  userEmail?: string;
+  userId?: string;
+}): Promise<void> {
+  const { productId, productName, removeActiveStocks = false, reason, userEmail, userId } = params;
+
+  try {
+    // 1. Verificar saldos em pallets
+    const q = query(collection(db, PALLET_STOCK_COL), where('productId', '==', productId));
+    const snap = await getDocs(q);
+
+    const activeStocks = snap.docs.filter((d) => d.data().quantity > 0);
+
+    if (activeStocks.length > 0 && !removeActiveStocks) {
+      const palletCodes = activeStocks.map((d) => d.data().palletCode).join(', ');
+      throw new Error(
+        `O produto "${productName}" ainda possui saldo ativo nos pallets: ${palletCodes}. Confirme a baixa dos saldos para prosseguir com a exclusão.`
+      );
+    }
+
+    // 2. Se autorizado a remover estoques ativos, registra movimentação de baixa para cada pallet
+    for (const docSnap of snap.docs) {
+      const stockData = docSnap.data() as PalletStock;
+      if (stockData.quantity > 0) {
+        // Gravar movimentação de auditoria
+        const movementRef = doc(collection(db, MOVEMENTS_COL));
+        const movement: Movement = {
+          id: movementRef.id,
+          type: 'RETIRADA',
+          productId: stockData.productId,
+          productName: stockData.productName,
+          productCode: stockData.productCode || '',
+          originPalletId: stockData.palletId,
+          originPalletCode: stockData.palletCode,
+          quantity: stockData.quantity,
+          unit: stockData.unit,
+          reason: reason?.trim() || `Exclusão do produto "${productName}" do catálogo`,
+          userEmail: userEmail || 'Operador',
+          userId: userId || '',
+          createdAt: new Date().toISOString(),
+        };
+        await setDoc(movementRef, movement);
+      }
+      // Deletar o registro de estoque no pallet
+      await deleteDoc(doc(db, PALLET_STOCK_COL, docSnap.id));
+    }
+
+    // 3. Deletar o produto do catálogo
+    await deleteDoc(doc(db, PRODUCTS_COL, productId));
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('ainda possui saldo ativo')) {
       throw err;
     }
-    handleFirestoreError(err, OperationType.DELETE, `${PALLETS_COL}/${palletId}`);
+    handleFirestoreError(err, OperationType.DELETE, `${PRODUCTS_COL}/${productId}`);
+  }
+}
+
+/**
+ * Excluir item de um pallet específico (desalocar ou corrigir lançamento indevido)
+ * Preserva o histórico de auditoria gravando a retirada/baixa.
+ */
+export async function deleteStockItemFromPallet(params: {
+  stockId: string;
+  reason?: string;
+  userEmail?: string;
+  userId?: string;
+}): Promise<void> {
+  const { stockId, reason, userEmail, userId } = params;
+
+  try {
+    const stockRef = doc(db, PALLET_STOCK_COL, stockId);
+    const snap = await getDoc(stockRef);
+
+    if (!snap.exists()) {
+      return; // Já não existe
+    }
+
+    const stockData = snap.data() as PalletStock;
+
+    // Se havia quantidade > 0, grava a movimentação para não deixar furo no inventário
+    if (stockData.quantity > 0) {
+      const movementRef = doc(collection(db, MOVEMENTS_COL));
+      const movement: Movement = {
+        id: movementRef.id,
+        type: 'RETIRADA',
+        productId: stockData.productId,
+        productName: stockData.productName,
+        productCode: stockData.productCode || '',
+        originPalletId: stockData.palletId,
+        originPalletCode: stockData.palletCode,
+        quantity: stockData.quantity,
+        unit: stockData.unit,
+        reason: reason?.trim() || `Item excluído diretamente do Pallet ${stockData.palletCode}`,
+        userEmail: userEmail || 'Operador',
+        userId: userId || '',
+        createdAt: new Date().toISOString(),
+      };
+      await setDoc(movementRef, movement);
+    }
+
+    // Deleta o registro de estoque do pallet
+    await deleteDoc(stockRef);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `${PALLET_STOCK_COL}/${stockId}`);
   }
 }
 
@@ -624,9 +924,10 @@ export async function seedDemoDataIfEmpty(): Promise<boolean> {
 
     // 3. Criar Estoque por Pallet:
     // P01 tem 12 caixas de Ketchup e 20 caixas de Maionese (mostrando múltiplos produtos no mesmo pallet)
-    const stock1Ref = doc(collection(db, PALLET_STOCK_COL));
+    const stock1Id = getPalletStockDocId(p01.id, prodKetchup.id, 'caixas');
+    const stock1Ref = doc(db, PALLET_STOCK_COL, stock1Id);
     const stock1: PalletStock = {
-      id: stock1Ref.id,
+      id: stock1Id,
       palletId: p01.id,
       palletCode: p01.code,
       productId: prodKetchup.id,
@@ -639,9 +940,10 @@ export async function seedDemoDataIfEmpty(): Promise<boolean> {
     };
     await setDoc(stock1Ref, stock1);
 
-    const stock2Ref = doc(collection(db, PALLET_STOCK_COL));
+    const stock2Id = getPalletStockDocId(p01.id, prodMaionese.id, 'caixas');
+    const stock2Ref = doc(db, PALLET_STOCK_COL, stock2Id);
     const stock2: PalletStock = {
-      id: stock2Ref.id,
+      id: stock2Id,
       palletId: p01.id,
       palletCode: p01.code,
       productId: prodMaionese.id,
@@ -655,9 +957,10 @@ export async function seedDemoDataIfEmpty(): Promise<boolean> {
     await setDoc(stock2Ref, stock2);
 
     // P02 tem 5 caixas de Ketchup e 15 caixas de Molho
-    const stock3Ref = doc(collection(db, PALLET_STOCK_COL));
+    const stock3Id = getPalletStockDocId(p02.id, prodKetchup.id, 'caixas');
+    const stock3Ref = doc(db, PALLET_STOCK_COL, stock3Id);
     const stock3: PalletStock = {
-      id: stock3Ref.id,
+      id: stock3Id,
       palletId: p02.id,
       palletCode: p02.code,
       productId: prodKetchup.id,
@@ -670,9 +973,10 @@ export async function seedDemoDataIfEmpty(): Promise<boolean> {
     };
     await setDoc(stock3Ref, stock3);
 
-    const stock4Ref = doc(collection(db, PALLET_STOCK_COL));
+    const stock4Id = getPalletStockDocId(p02.id, prodMolho.id, 'caixas');
+    const stock4Ref = doc(db, PALLET_STOCK_COL, stock4Id);
     const stock4: PalletStock = {
-      id: stock4Ref.id,
+      id: stock4Id,
       palletId: p02.id,
       palletCode: p02.code,
       productId: prodMolho.id,
@@ -686,9 +990,10 @@ export async function seedDemoDataIfEmpty(): Promise<boolean> {
     await setDoc(stock4Ref, stock4);
 
     // P03 tem 50 unidades de Açúcar Cristal
-    const stock5Ref = doc(collection(db, PALLET_STOCK_COL));
+    const stock5Id = getPalletStockDocId(p03.id, prodAcucar.id, 'unidades');
+    const stock5Ref = doc(db, PALLET_STOCK_COL, stock5Id);
     const stock5: PalletStock = {
-      id: stock5Ref.id,
+      id: stock5Id,
       palletId: p03.id,
       palletCode: p03.code,
       productId: prodAcucar.id,

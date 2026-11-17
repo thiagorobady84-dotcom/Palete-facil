@@ -15,14 +15,14 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Products collection
+    // Products collection (permite exclusão segura de produtos por usuários autenticados)
     match /products/{productId} {
       allow read: if isSignedIn();
       allow create, update: if isSignedIn()
         && incoming().name is string
         && incoming().name.size() > 0
         && incoming().name.size() <= 150;
-      allow delete: if false;
+      allow delete: if isSignedIn();
     }
 
     // Pallets collection

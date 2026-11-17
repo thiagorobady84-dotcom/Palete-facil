@@ -1,1 +1,49 @@
 @import "tailwindcss";
+
+/* iOS Safe Areas & WebKit Optimizations */
+:root {
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+}
+
+/* Evita o zoom automático incômodo do Safari iOS em campos de input */
+@media screen and (max-width: 768px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* Desativa o highlight cinza padrão de toque no iOS */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Suporte a rolagem suave em dispositivos iOS */
+.ios-smooth-scroll {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Espaçamento para o notch/Dynamic Island no topo */
+.pt-safe-top {
+  padding-top: max(12px, env(safe-area-inset-top));
+}
+
+/* Espaçamento para a barra de gestos inferior do iPhone */
+.pb-safe-bottom {
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+}
+
+/* Evita oscilação horizontal e melhora resposta ao toque em telas sensíveis */
+html, body {
+  overflow-x: hidden;
+  max-width: 100vw;
+  -webkit-text-size-adjust: 100%;
+}
+
+button, a {
+  touch-action: manipulation;
+}

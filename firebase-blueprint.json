@@ -8,6 +8,7 @@
         "name": { "type": "string", "minLength": 1, "maxLength": 150 },
         "code": { "type": "string", "maxLength": 100 },
         "normalizedName": { "type": "string", "maxLength": 150 },
+        "expirationDate": { "type": "string", "maxLength": 20 },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
@@ -38,6 +39,7 @@
         "normalizedProductName": { "type": "string", "maxLength": 150 },
         "quantity": { "type": "number" },
         "unit": { "type": "string", "enum": ["caixas", "unidades"] },
+        "expirationDate": { "type": "string", "maxLength": 20 },
         "updatedAt": { "type": "string" }
       },
       "required": ["palletId", "palletCode", "productId", "productName", "quantity", "unit"]
@@ -57,6 +59,7 @@
         "destinationPalletCode": { "type": "string", "maxLength": 30 },
         "quantity": { "type": "number" },
         "unit": { "type": "string", "enum": ["caixas", "unidades"] },
+        "expirationDate": { "type": "string", "maxLength": 20 },
         "reason": { "type": "string", "maxLength": 250 },
         "userId": { "type": "string", "maxLength": 128 },
         "userEmail": { "type": "string", "maxLength": 150 },

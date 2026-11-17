@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { Movement, MovementType } from '../types';
 import { normalizeText } from '../utils/normalize';
+import { formatExpirationDate } from '../utils/date';
 
 interface HistoryTabProps {
   movements: Movement[];
@@ -100,7 +101,7 @@ export const HistoryTab: React.FC<HistoryTabProps> = ({ movements }) => {
   };
 
   return (
-    <div className="space-y-4 pb-20">
+    <div className="space-y-4 pb-28">
       {/* Header and filters */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
         <div className="flex items-center justify-between">
@@ -227,6 +228,13 @@ export const HistoryTab: React.FC<HistoryTabProps> = ({ movements }) => {
                           </span>
                         )}
                       </div>
+
+                      {/* Optional expiration date */}
+                      {mov.expirationDate && (
+                        <p className="text-[11px] text-slate-500 font-semibold mt-1">
+                          Validade: <span className="text-slate-700">{formatExpirationDate(mov.expirationDate)}</span>
+                        </p>
+                      )}
 
                       {/* Reason or observation */}
                       {mov.reason && (

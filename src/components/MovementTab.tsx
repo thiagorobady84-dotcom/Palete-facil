@@ -34,7 +34,7 @@ export const MovementTab: React.FC<MovementTabProps> = ({
 
   // Available stocks with quantity > 0
   const activeStocks = useMemo(() => {
-    return palletStocks.filter((s) => s.quantity > 0);
+    return palletStocks.filter((s) => (Number(s.quantity) || 0) > 0);
   }, [palletStocks]);
 
   // Selected stock item (contains palletId, productId, unit, current quantity)
@@ -45,18 +45,18 @@ export const MovementTab: React.FC<MovementTabProps> = ({
 
   // Transfer specific state
   const [destPalletId, setDestPalletId] = useState<string>('');
-  const [transferQty, setTransferQty] = useState<number>(1);
+  const [transferQty, setTransferQty] = useState<number | ''>(1);
   const [transferReason, setTransferReason] = useState<string>('');
   const [isCreatingDestPallet, setIsCreatingDestPallet] = useState(false);
   const [newDestCode, setNewDestCode] = useState('');
   const [newDestLoc, setNewDestLoc] = useState('');
 
   // Withdraw specific state
-  const [withdrawQty, setWithdrawQty] = useState<number>(1);
+  const [withdrawQty, setWithdrawQty] = useState<number | ''>(1);
   const [withdrawReason, setWithdrawReason] = useState<string>('');
 
   // Adjust specific state
-  const [adjustNewQty, setAdjustNewQty] = useState<number>(0);
+  const [adjustNewQty, setAdjustNewQty] = useState<number | ''>(0);
   const [adjustReason, setAdjustReason] = useState<string>('');
 
   // Status & Feedback
@@ -72,11 +72,23 @@ export const MovementTab: React.FC<MovementTabProps> = ({
       setWithdrawQty(1);
       setAdjustNewQty(initialStock.quantity);
       if (initialAction) setActiveSubTab(initialAction);
-    } else if (activeStocks.length > 0 && !selectedStockId) {
-      setSelectedStockId(activeStocks[0].id);
-      setAdjustNewQty(activeStocks[0].quantity);
     }
-  }, [initialStock, activeStocks, selectedStockId, initialAction]);
+  }, [initialStock, initialAction]);
+
+  // Ensure selectedStockId points to a valid activeStock at all times
+  // (Prevents ghost/deleted IDs after complete withdrawals)
+  useEffect(() => {
+    if (activeStocks.length > 0) {
+      const isStillActive = activeStocks.some((s) => s.id === selectedStockId);
+      if (!selectedStockId || !isStillActive) {
+        const nextStock = activeStocks[0];
+        setSelectedStockId(nextStock.id);
+        setAdjustNewQty(nextStock.quantity);
+      }
+    } else {
+      setSelectedStockId('');
+    }
+  }, [activeStocks, selectedStockId]);
 
   // Keep destination pallet valid
   useEffect(() => {
@@ -106,12 +118,13 @@ export const MovementTab: React.FC<MovementTabProps> = ({
       return;
     }
 
-    if (transferQty <= 0 || !Number.isInteger(Number(transferQty))) {
+    const parsedTransferQty = typeof transferQty === 'number' ? transferQty : parseInt(transferQty, 10);
+    if (isNaN(parsedTransferQty) || parsedTransferQty <= 0 || !Number.isInteger(parsedTransferQty)) {
       setErrorMessage('A quantidade a transferir deve ser um número inteiro positivo.');
       return;
     }
 
-    if (transferQty > currentSelectedStock.quantity) {
+    if (parsedTransferQty > currentSelectedStock.quantity) {
       setErrorMessage(
         `Saldo insuficiente no Pallet ${currentSelectedStock.palletCode}! Disponível: ${currentSelectedStock.quantity} ${currentSelectedStock.unit}.`
       );
@@ -154,7 +167,7 @@ export const MovementTab: React.FC<MovementTabProps> = ({
         originStockId: currentSelectedStock.id,
         destinationPalletId: targetDestId,
         destinationPalletCode: targetDestCode,
-        quantityToTransfer: Number(transferQty),
+        quantityToTransfer: parsedTransferQty,
         reason: transferReason.trim() || 'Transferência entre pallets',
         userEmail: currentUser?.email || 'Operador',
         userId: currentUser?.uid || '',
@@ -184,14 +197,16 @@ export const MovementTab: React.FC<MovementTabProps> = ({
       return;
     }
 
-    if (withdrawQty <= 0 || !Number.isInteger(Number(withdrawQty))) {
+    const parsedWithdrawQty = typeof withdrawQty === 'number' ? withdrawQty : parseInt(withdrawQty, 10);
+    if (isNaN(parsedWithdrawQty) || parsedWithdrawQty <= 0 || !Number.isInteger(parsedWithdrawQty)) {
       setErrorMessage('A quantidade a retirar deve ser um número inteiro positivo.');
       return;
     }
 
-    if (withdrawQty > currentSelectedStock.quantity) {
+    const stockCurrentQty = Number(currentSelectedStock.quantity) || 0;
+    if (parsedWithdrawQty > stockCurrentQty) {
       setErrorMessage(
-        `Saldo insuficiente no Pallet ${currentSelectedStock.palletCode}! Disponível: ${currentSelectedStock.quantity} ${currentSelectedStock.unit}.`
+        `Saldo insuficiente no Pallet ${currentSelectedStock.palletCode}! Disponível: ${stockCurrentQty} ${currentSelectedStock.unit}.`
       );
       return;
     }
@@ -200,14 +215,14 @@ export const MovementTab: React.FC<MovementTabProps> = ({
     try {
       await withdrawStock({
         stockId: currentSelectedStock.id,
-        quantityToWithdraw: Number(withdrawQty),
+        quantityToWithdraw: parsedWithdrawQty,
         reason: withdrawReason.trim() || 'Retirada operacional',
         userEmail: currentUser?.email || 'Operador',
         userId: currentUser?.uid || '',
       });
 
       setSuccessMessage(
-        `Retirada efetuada com sucesso! ${withdrawQty} ${currentSelectedStock.unit} retirados do Pallet ${currentSelectedStock.palletCode}.`
+        `Retirada efetuada com sucesso! ${parsedWithdrawQty} ${currentSelectedStock.unit} retirados do Pallet ${currentSelectedStock.palletCode}.`
       );
       setWithdrawReason('');
       setWithdrawQty(1);
@@ -230,7 +245,8 @@ export const MovementTab: React.FC<MovementTabProps> = ({
       return;
     }
 
-    if (adjustNewQty < 0 || !Number.isInteger(Number(adjustNewQty))) {
+    const parsedAdjustQty = typeof adjustNewQty === 'number' ? adjustNewQty : parseInt(adjustNewQty, 10);
+    if (isNaN(parsedAdjustQty) || parsedAdjustQty < 0 || !Number.isInteger(parsedAdjustQty)) {
       setErrorMessage('A nova quantidade deve ser um número inteiro maior ou igual a zero.');
       return;
     }
@@ -240,7 +256,7 @@ export const MovementTab: React.FC<MovementTabProps> = ({
       return;
     }
 
-    if (adjustNewQty === currentSelectedStock.quantity) {
+    if (parsedAdjustQty === currentSelectedStock.quantity) {
       setErrorMessage('A nova quantidade é idêntica ao saldo atual.');
       return;
     }
@@ -249,14 +265,14 @@ export const MovementTab: React.FC<MovementTabProps> = ({
     try {
       await adjustStock({
         stockId: currentSelectedStock.id,
-        newQuantity: Number(adjustNewQty),
+        newQuantity: parsedAdjustQty,
         reason: adjustReason.trim(),
         userEmail: currentUser?.email || 'Operador',
         userId: currentUser?.uid || '',
       });
 
       setSuccessMessage(
-        `Ajuste salvo com sucesso! Saldo do Pallet ${currentSelectedStock.palletCode} atualizado para ${adjustNewQty} ${currentSelectedStock.unit}.`
+        `Ajuste salvo com sucesso! Saldo do Pallet ${currentSelectedStock.palletCode} atualizado para ${parsedAdjustQty} ${currentSelectedStock.unit}.`
       );
       setAdjustReason('');
       if (onSuccessMovement) onSuccessMovement();
@@ -268,43 +284,43 @@ export const MovementTab: React.FC<MovementTabProps> = ({
   };
 
   return (
-    <div className="max-w-xl mx-auto space-y-4 pb-20">
+    <div className="max-w-xl mx-auto space-y-4 pb-28">
       {/* Sub-tab navigation */}
       <div className="bg-slate-200 p-1 rounded-2xl grid grid-cols-3 gap-1">
         <button
           onClick={() => handleSwitchTab('transfer')}
-          className={`py-2.5 px-2 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition ${
+          className={`py-2 px-1 sm:py-2.5 sm:px-2 rounded-xl text-[11px] sm:text-xs md:text-sm font-bold flex items-center justify-center gap-1 sm:gap-1.5 transition active:scale-95 ${
             activeSubTab === 'transfer'
               ? 'bg-emerald-700 text-white shadow-sm'
               : 'text-slate-700 hover:text-slate-900'
           }`}
         >
-          <ArrowLeftRight className="w-4 h-4" />
-          <span>Transferência</span>
+          <ArrowLeftRight className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+          <span className="truncate">Transferência</span>
         </button>
 
         <button
           onClick={() => handleSwitchTab('withdraw')}
-          className={`py-2.5 px-2 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition ${
+          className={`py-2 px-1 sm:py-2.5 sm:px-2 rounded-xl text-[11px] sm:text-xs md:text-sm font-bold flex items-center justify-center gap-1 sm:gap-1.5 transition active:scale-95 ${
             activeSubTab === 'withdraw'
               ? 'bg-amber-600 text-white shadow-sm'
               : 'text-slate-700 hover:text-slate-900'
           }`}
         >
-          <MinusCircle className="w-4 h-4" />
-          <span>Retirada</span>
+          <MinusCircle className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+          <span className="truncate">Retirada</span>
         </button>
 
         <button
           onClick={() => handleSwitchTab('adjust')}
-          className={`py-2.5 px-2 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition ${
+          className={`py-2 px-1 sm:py-2.5 sm:px-2 rounded-xl text-[11px] sm:text-xs md:text-sm font-bold flex items-center justify-center gap-1 sm:gap-1.5 transition active:scale-95 ${
             activeSubTab === 'adjust'
               ? 'bg-purple-700 text-white shadow-sm'
               : 'text-slate-700 hover:text-slate-900'
           }`}
         >
-          <Sliders className="w-4 h-4" />
-          <span>Ajuste</span>
+          <Sliders className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+          <span className="truncate">Ajuste</span>
         </button>
       </div>
 
@@ -473,8 +489,11 @@ export const MovementTab: React.FC<MovementTabProps> = ({
                 <div className="flex items-center space-x-2">
                   <button
                     type="button"
-                    onClick={() => setTransferQty((q) => Math.max(1, q - 1))}
-                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200"
+                    onClick={() => {
+                      const cur = typeof transferQty === 'number' ? transferQty : 1;
+                      setTransferQty(Math.max(1, cur - 1));
+                    }}
+                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200 active:scale-95"
                   >
                     -
                   </button>
@@ -483,25 +502,28 @@ export const MovementTab: React.FC<MovementTabProps> = ({
                     min="1"
                     max={currentSelectedStock?.quantity || 9999}
                     value={transferQty}
-                    onChange={(e) =>
-                      setTransferQty(
-                        Math.min(
-                          currentSelectedStock?.quantity || 9999,
-                          Math.max(1, parseInt(e.target.value, 10) || 1)
-                        )
-                      )
-                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === '') {
+                        setTransferQty('');
+                      } else {
+                        const parsed = parseInt(val, 10);
+                        if (!isNaN(parsed)) {
+                          setTransferQty(Math.min(currentSelectedStock?.quantity || 9999, Math.max(0, parsed)));
+                        }
+                      }
+                    }}
+                    placeholder="Qtd"
                     className="flex-1 bg-slate-50 border border-slate-300 rounded-xl py-2 text-center text-xl font-black text-emerald-900 focus:ring-2 focus:ring-emerald-500"
                     required
                   />
                   <button
                     type="button"
-                    onClick={() =>
-                      setTransferQty((q) =>
-                        Math.min(currentSelectedStock?.quantity || 9999, q + 1)
-                      )
-                    }
-                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200"
+                    onClick={() => {
+                      const cur = typeof transferQty === 'number' ? transferQty : 0;
+                      setTransferQty(Math.min(currentSelectedStock?.quantity || 9999, cur + 1));
+                    }}
+                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200 active:scale-95"
                   >
                     +
                   </button>
@@ -555,8 +577,11 @@ export const MovementTab: React.FC<MovementTabProps> = ({
                 <div className="flex items-center space-x-2">
                   <button
                     type="button"
-                    onClick={() => setWithdrawQty((q) => Math.max(1, q - 1))}
-                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200"
+                    onClick={() => {
+                      const cur = typeof withdrawQty === 'number' ? withdrawQty : 1;
+                      setWithdrawQty(Math.max(1, cur - 1));
+                    }}
+                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200 active:scale-95"
                   >
                     -
                   </button>
@@ -565,25 +590,28 @@ export const MovementTab: React.FC<MovementTabProps> = ({
                     min="1"
                     max={currentSelectedStock?.quantity || 9999}
                     value={withdrawQty}
-                    onChange={(e) =>
-                      setWithdrawQty(
-                        Math.min(
-                          currentSelectedStock?.quantity || 9999,
-                          Math.max(1, parseInt(e.target.value, 10) || 1)
-                        )
-                      )
-                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === '') {
+                        setWithdrawQty('');
+                      } else {
+                        const parsed = parseInt(val, 10);
+                        if (!isNaN(parsed)) {
+                          setWithdrawQty(Math.min(currentSelectedStock?.quantity || 9999, Math.max(0, parsed)));
+                        }
+                      }
+                    }}
+                    placeholder="Qtd"
                     className="flex-1 bg-slate-50 border border-slate-300 rounded-xl py-2 text-center text-xl font-black text-amber-900 focus:ring-2 focus:ring-amber-500"
                     required
                   />
                   <button
                     type="button"
-                    onClick={() =>
-                      setWithdrawQty((q) =>
-                        Math.min(currentSelectedStock?.quantity || 9999, q + 1)
-                      )
-                    }
-                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200"
+                    onClick={() => {
+                      const cur = typeof withdrawQty === 'number' ? withdrawQty : 0;
+                      setWithdrawQty(Math.min(currentSelectedStock?.quantity || 9999, cur + 1));
+                    }}
+                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200 active:scale-95"
                   >
                     +
                   </button>
@@ -624,8 +652,11 @@ export const MovementTab: React.FC<MovementTabProps> = ({
                 <div className="flex items-center space-x-2">
                   <button
                     type="button"
-                    onClick={() => setAdjustNewQty((q) => Math.max(0, q - 1))}
-                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200"
+                    onClick={() => {
+                      const cur = typeof adjustNewQty === 'number' ? adjustNewQty : 0;
+                      setAdjustNewQty(Math.max(0, cur - 1));
+                    }}
+                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200 active:scale-95"
                   >
                     -
                   </button>
@@ -633,14 +664,28 @@ export const MovementTab: React.FC<MovementTabProps> = ({
                     type="number"
                     min="0"
                     value={adjustNewQty}
-                    onChange={(e) => setAdjustNewQty(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === '') {
+                        setAdjustNewQty('');
+                      } else {
+                        const parsed = parseInt(val, 10);
+                        if (!isNaN(parsed)) {
+                          setAdjustNewQty(Math.max(0, parsed));
+                        }
+                      }
+                    }}
+                    placeholder="0"
                     className="flex-1 bg-slate-50 border border-slate-300 rounded-xl py-2 text-center text-xl font-black text-purple-900 focus:ring-2 focus:ring-purple-500"
                     required
                   />
                   <button
                     type="button"
-                    onClick={() => setAdjustNewQty((q) => q + 1)}
-                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200"
+                    onClick={() => {
+                      const cur = typeof adjustNewQty === 'number' ? adjustNewQty : 0;
+                      setAdjustNewQty(cur + 1);
+                    }}
+                    className="w-11 h-11 bg-slate-100 text-slate-700 font-black text-lg rounded-xl border border-slate-200 active:scale-95"
                   >
                     +
                   </button>

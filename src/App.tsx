@@ -2,20 +2,23 @@ import React, { useState, useEffect } from 'react';
 import {
   collection,
   onSnapshot,
-  query,
-  orderBy,
 } from 'firebase/firestore';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import {
   auth,
   db,
   loginWithGoogle,
+  loginWithGoogleRedirect,
+  checkRedirectResult,
+  parseAuthError,
+  ParsedAuthError,
   testConnection,
   handleFirestoreError,
   OperationType,
+  resolvedFirebaseConfig,
 } from './firebase';
 import { Product, Pallet, PalletStock, Movement, TabType } from './types';
-import { seedDemoDataIfEmpty } from './services/palletService';
+import { seedDemoDataIfEmpty, cleanupAndConsolidatePalletStock } from './services/palletService';
 
 import { Header } from './components/Header';
 import { BottomNav } from './components/BottomNav';
@@ -25,11 +28,15 @@ import { IntakeTab } from './components/IntakeTab';
 import { MovementTab } from './components/MovementTab';
 import { HistoryTab } from './components/HistoryTab';
 import { PalletDetailModal } from './components/PalletDetailModal';
-import { Warehouse, LogIn, ShieldAlert } from 'lucide-react';
+import { AuthErrorBanner } from './components/AuthErrorBanner';
+import { PWAInstallButton } from './components/PWAInstallButton';
+import { Warehouse, LogIn, RefreshCw, Smartphone, Globe } from 'lucide-react';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [authError, setAuthError] = useState<ParsedAuthError | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>('pesquisar');
 
   // Real-time Firestore state
@@ -44,28 +51,42 @@ export default function App() {
   // Pre-fill parameters for tab transitions
   const [intakeProductPrefill, setIntakeProductPrefill] = useState<{
     name: string;
-    code?: string;
     palletId?: string;
-  }>({ name: '', code: '', palletId: '' });
+  }>({ name: '', palletId: '' });
 
   const [movementStockPrefill, setMovementStockPrefill] = useState<{
     stock: PalletStock | null;
     action: 'transfer' | 'withdraw' | 'adjust';
   }>({ stock: null, action: 'transfer' });
 
-  // 1. Check Connection & Auth state
+  // 1. Check Connection, Process Redirect and Monitor Auth state
   useEffect(() => {
     testConnection();
+
+    // Check if user just returned from a Google Redirect login flow
+    checkRedirectResult()
+      .then((res) => {
+        if (res?.user) {
+          setCurrentUser(res.user);
+          setAuthError(null);
+        }
+      })
+      .catch((err) => {
+        console.error('Redirect result catch:', err);
+        setAuthError(parseAuthError(err));
+      });
 
     const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
       setAuthLoading(false);
       if (user) {
-        // Seed realistic demo data if collection is empty
+        setAuthError(null);
+        // Seed realistic demo data if collection is empty & clean up any zero/corrupted records
         try {
           await seedDemoDataIfEmpty();
+          await cleanupAndConsolidatePalletStock();
         } catch (err) {
-          console.error('Seed error:', err);
+          console.error('Init stock check error:', err);
         }
       }
     });
@@ -153,14 +174,42 @@ export default function App() {
     }
   }, [pallets, selectedPallet]);
 
+  // Handlers for authentication
+  const handleLoginPopup = async () => {
+    setIsAuthenticating(true);
+    setAuthError(null);
+    try {
+      await loginWithGoogle();
+    } catch (err: any) {
+      console.error('Login Popup Error:', err);
+      const parsed = parseAuthError(err);
+      setAuthError(parsed);
+    } finally {
+      setIsAuthenticating(false);
+    }
+  };
+
+  const handleLoginRedirect = async () => {
+    setIsAuthenticating(true);
+    setAuthError(null);
+    try {
+      await loginWithGoogleRedirect();
+    } catch (err: any) {
+      console.error('Login Redirect Error:', err);
+      const parsed = parseAuthError(err);
+      setAuthError(parsed);
+      setIsAuthenticating(false);
+    }
+  };
+
   // Handlers for cross-tab actions
-  const handleGoToIntakeWithProduct = (productName: string, productCode?: string) => {
-    setIntakeProductPrefill({ name: productName, code: productCode, palletId: '' });
+  const handleGoToIntakeWithProduct = (productName: string) => {
+    setIntakeProductPrefill({ name: productName, palletId: '' });
     setActiveTab('entrada');
   };
 
   const handleAddProductToPallet = (pallet: Pallet) => {
-    setIntakeProductPrefill({ name: '', code: '', palletId: pallet.id });
+    setIntakeProductPrefill({ name: '', palletId: pallet.id });
     setActiveTab('entrada');
   };
 
@@ -179,8 +228,8 @@ export default function App() {
     setActiveTab('movimentar');
   };
 
-  // Compute summary stats
-  const totalItemsCount = palletStock.reduce((acc, s) => acc + s.quantity, 0);
+  // Compute summary stats with safe numeric parsing
+  const totalItemsCount = palletStock.reduce((acc, s) => acc + (Number(s.quantity) || 0), 0);
 
   if (authLoading) {
     return (
@@ -198,26 +247,42 @@ export default function App() {
         currentUser={currentUser}
         totalPallets={pallets.length}
         totalItems={totalItemsCount}
+        onLoginClick={handleLoginPopup}
       />
 
       {/* Main Container */}
-      <main className="flex-1 max-w-4xl w-full mx-auto p-3 sm:p-5">
+      <main className="flex-1 max-w-4xl w-full mx-auto p-3 sm:p-5 space-y-3.5">
+        <PWAInstallButton variant="banner" />
+
         {!currentUser ? (
           // Welcome / Sign-in required screen for multi-user security
-          <div className="my-8 bg-white border border-slate-200 rounded-3xl p-6 sm:p-10 shadow-sm text-center max-w-md mx-auto">
-            <div className="w-16 h-16 bg-emerald-100 text-emerald-800 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-inner">
+          <div className="my-6 bg-white border border-slate-200 rounded-3xl p-6 sm:p-8 shadow-sm text-center max-w-lg mx-auto space-y-5">
+            <div className="w-16 h-16 bg-emerald-100 text-emerald-800 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
               <Warehouse className="w-8 h-8 text-emerald-700" />
             </div>
 
-            <h2 className="text-2xl font-black text-slate-900 tracking-tight">
-              SISTEMA PALLET FÁCIL
-            </h2>
-            <p className="text-sm text-slate-600 mt-2 leading-relaxed">
-              Endereçamento logístico por pallets em tempo real. Identifique o operador para
-              gravar movimentações e garantir a segurança do estoque.
-            </p>
+            <div>
+              <h2 className="text-2xl font-black text-slate-900 tracking-tight">
+                SISTEMA PALLET FÁCIL
+              </h2>
+              <p className="text-sm text-slate-600 mt-1 leading-relaxed">
+                Endereçamento logístico por pallets em tempo real. Identifique o operador para
+                gravar movimentações e garantir a segurança do estoque.
+              </p>
+            </div>
 
-            <div className="my-6 p-4 bg-emerald-50 rounded-2xl border border-emerald-200 text-left text-xs text-emerald-900 space-y-1.5">
+            {/* Diagnostic Alert Banner if an Auth Error Occurred */}
+            {authError && (
+              <AuthErrorBanner
+                error={authError}
+                onRetryPopup={handleLoginPopup}
+                onRetryRedirect={handleLoginRedirect}
+                onDismiss={() => setAuthError(null)}
+                isRetrying={isAuthenticating}
+              />
+            )}
+
+            <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-200 text-left text-xs text-emerald-900 space-y-1.5">
               <div className="font-bold flex items-center gap-1.5 text-emerald-800">
                 <span>✓</span> Localize qualquer produto e seus respectivos pallets
               </div>
@@ -229,16 +294,40 @@ export default function App() {
               </div>
             </div>
 
-            <button
-              onClick={() => loginWithGoogle()}
-              className="w-full bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 text-white font-black text-base py-3.5 px-6 rounded-2xl shadow-md transition flex items-center justify-center gap-2.5"
-            >
-              <LogIn className="w-5 h-5" />
-              <span>Entrar com Google</span>
-            </button>
-            <p className="text-[11px] text-slate-400 mt-3">
-              Acesso seguro e sincronizado com toda a equipe do armazém.
-            </p>
+            <div className="space-y-2.5">
+              <button
+                onClick={handleLoginPopup}
+                disabled={isAuthenticating}
+                className="w-full bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 text-white font-black text-base py-3.5 px-6 rounded-2xl shadow-md transition flex items-center justify-center gap-2.5 disabled:opacity-70"
+              >
+                {isAuthenticating ? (
+                  <RefreshCw className="w-5 h-5 animate-spin" />
+                ) : (
+                  <LogIn className="w-5 h-5" />
+                )}
+                <span>{isAuthenticating ? 'Abrindo login do Google...' : 'Entrar com Google'}</span>
+              </button>
+
+              <button
+                onClick={handleLoginRedirect}
+                disabled={isAuthenticating}
+                className="w-full text-xs font-bold text-slate-600 hover:text-emerald-800 bg-slate-50 hover:bg-slate-100 py-2.5 px-4 rounded-xl border border-slate-200 transition flex items-center justify-center gap-1.5"
+                title="Use se estiver no celular e a janela de login não abrir"
+              >
+                <Smartphone className="w-4 h-4 text-slate-400" />
+                <span>Problema com janela pop-up? Clique para entrar via Redirecionamento</span>
+              </button>
+            </div>
+
+            {/* Current Host Indicator */}
+            {typeof window !== 'undefined' && window.location.hostname !== 'localhost' && (
+              <div className="pt-2 border-t border-slate-100 text-[11px] text-slate-400 flex items-center justify-center gap-1">
+                <Globe className="w-3 h-3" />
+                <span>
+                  Hospedado em: <strong className="font-mono text-slate-600">{window.location.hostname}</strong>
+                </span>
+              </div>
+            )}
           </div>
         ) : (
           <>
@@ -248,9 +337,11 @@ export default function App() {
                 products={products}
                 pallets={pallets}
                 palletStock={palletStock}
+                currentUser={currentUser}
                 onSelectPallet={(pallet) => setSelectedPallet(pallet)}
                 onGoToIntakeWithProduct={handleGoToIntakeWithProduct}
                 onGoToTransferWithStock={handleGoToTransferWithStock}
+                onGoToWithdrawWithStock={handleGoToWithdrawWithStock}
               />
             )}
 
@@ -258,6 +349,7 @@ export default function App() {
               <PalletsTab
                 pallets={pallets}
                 palletStocks={palletStock}
+                currentUser={currentUser}
                 onSelectPallet={(pallet) => setSelectedPallet(pallet)}
                 onGoToIntake={() => setActiveTab('entrada')}
               />
@@ -269,7 +361,6 @@ export default function App() {
                 pallets={pallets}
                 currentUser={currentUser}
                 initialProductName={intakeProductPrefill.name}
-                initialProductCode={intakeProductPrefill.code}
                 initialPalletId={intakeProductPrefill.palletId}
                 onSuccessIntake={() => {
                   // Keep on tab or navigate as needed
@@ -285,8 +376,8 @@ export default function App() {
                 initialStock={movementStockPrefill.stock}
                 initialAction={movementStockPrefill.action}
                 onSuccessMovement={() => {
-                  // Refresh prefill
-                  setMovementStockPrefill({ stock: null, action: 'transfer' });
+                  // Keep the current subtab without forcing back to transfer
+                  setMovementStockPrefill((prev) => ({ ...prev, stock: null }));
                 }}
               />
             )}
@@ -303,6 +394,7 @@ export default function App() {
         <PalletDetailModal
           pallet={selectedPallet}
           palletStocks={palletStock}
+          currentUser={currentUser}
           onClose={() => setSelectedPallet(null)}
           onAddProductToPallet={handleAddProductToPallet}
           onTransferStock={handleGoToTransferWithStock}

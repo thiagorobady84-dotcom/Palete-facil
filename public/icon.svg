@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#15803d" />
+      <stop offset="100%" stop-color="#047857" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-opacity="0.25" />
+    </filter>
+  </defs>
+
+  <!-- Background with smooth rounded corners -->
+  <rect width="512" height="512" rx="112" fill="url(#grad)" />
+
+  <!-- Logistics Warehouse Box and Pallet Illustration -->
+  <g filter="url(#shadow)">
+    <!-- Main Logistics Box -->
+    <path d="M128 170 L256 100 L384 170 L256 240 Z" fill="#bbf7d0" stroke="#166534" stroke-width="6" stroke-linejoin="round" />
+    <path d="M128 170 L256 240 L256 350 L128 280 Z" fill="#86efac" stroke="#166534" stroke-width="6" stroke-linejoin="round" />
+    <path d="M384 170 L256 240 L256 350 L384 280 Z" fill="#4ade80" stroke="#166534" stroke-width="6" stroke-linejoin="round" />
+
+    <!-- Tape & Box detail -->
+    <path d="M236 110 L256 122 L276 110 L276 228 L256 240 L236 228 Z" fill="#fef08a" opacity="0.85" />
+
+    <!-- Pallet Wood Base -->
+    <!-- Top Deckboard -->
+    <rect x="96" y="360" width="320" height="24" rx="6" fill="#f59e0b" stroke="#78350f" stroke-width="5" />
+    
+    <!-- Stringer Blocks (Left, Center, Right) -->
+    <rect x="110" y="384" width="48" height="34" rx="4" fill="#d97706" stroke="#78350f" stroke-width="5" />
+    <rect x="232" y="384" width="48" height="34" rx="4" fill="#d97706" stroke="#78350f" stroke-width="5" />
+    <rect x="354" y="384" width="48" height="34" rx="4" fill="#d97706" stroke="#78350f" stroke-width="5" />
+
+    <!-- Bottom Deckboard -->
+    <rect x="96" y="418" width="320" height="20" rx="5" fill="#b45309" stroke="#78350f" stroke-width="5" />
+  </g>
+</svg>
